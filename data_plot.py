@@ -114,6 +114,7 @@ ax_count.set_ylim(0, 17)  # BUFFER_SIZE=16 + 余白1
 # 凡例を左軸側にまとめる
 handles_left, labels_left = ax_age.get_legend_handles_labels()
 ax_age.legend(handles_left + [h_count], labels_left + ["Buffer count"], loc="upper left")
+fig1.savefig("./result/parameters.png", dpi=150, bbox_inches="tight")
 
 # --- 元データと較正したデータを3Dプロットで比較するウィンドウ
 fig2 = plt.figure(figsize = (10, 5))
@@ -133,6 +134,8 @@ ax_cal.scatter(result["calib_x"], result["calib_y"], result["calib_z"], s=5, col
 lim = 1.0
 for ax in [ax_raw, ax_cal]:
     setup_3d_axes(ax, lim)
+
+fig2.savefig("./result/points.png", dpi=150, bbox_inches="tight")
 
 # --- バッファ内の計測点をスナップショットごとに3Dプロットするウィンドウ
 buffer_files = sorted(
@@ -170,5 +173,7 @@ if buffer_files:
         ax.scatter([0], [0], [0], marker="o", color="r", label="Origin")
         ax.scatter(norm_x, norm_y, norm_z, s=20, label="Buffer points")
         setup_3d_axes(ax, lim)
+
+    fig3.savefig("./result/snapshot.png", dpi=150, bbox_inches="tight")
 
 plt.show()

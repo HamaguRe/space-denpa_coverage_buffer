@@ -1,35 +1,28 @@
 //! 【CoverageBuffer】
-//! 
+//!
 //! 地磁気計測値が球面上に分布するようにデータを保持するバッファアルゴリズム
 
-use super::{Vector3, Matrix3x3};
+use super::{Matrix3x3, Vector3};
 
 /// バッファサイズ
 pub const BUFFER_SIZE: usize = 16;
 
-/// 角度閾値の理論計算値に掛ける係数（0〜1）
-/// 
-/// 1にするとバッファ内の点が球面上に均等に分布して
-/// 信頼度が1になったときに新しい点が追加されなくなるから
-/// 0.9程度にしておく（現実的には信頼度が1になることは無いけど）。
-const ANGULAR_THR_COEF: f32 = 0.9;
-
 /// バッファ内年齢閾値を調整する係数（小さすぎるとバッファが機能しないので注意）
-/// 
+///
 /// バッファ内年齢の平均値×LIFETIME_THR_COEFを越えた点は削除される。
 const LIFETIME_THR_COEF: f32 = 10.0;
 
 /// 計測値の寿命を管理するための構造体
 #[derive(Clone, Copy)]
 pub struct Entry {
-    pub point: Vector3<f32>,  // 地磁気計測値
-    pub age: u16,  // バッファ内データの年齢（バッファ更新時に+1）
+    pub point: Vector3<f32>, // 地磁気計測値
+    pub age: u16,            // バッファ内データの年齢（新点追加時に+1）
 }
 
-/// 分布度を維持するように地磁気計測値を保持するバッファ
+/// 空間上の均等な分布を維持するように地磁気計測値を保持するバッファ
 pub struct CoverageBuffer {
     pub buffer: [Option<Entry>; BUFFER_SIZE],
-    pub confidence_score: f32,  // データの信頼度（≒球状分布度）
+    crowded: (usize, f32), // (最密集点のインデックス, 最密集ペアの二乗距離)
 }
 
 impl CoverageBuffer {
@@ -37,26 +30,12 @@ impl CoverageBuffer {
     pub fn new() -> Self {
         Self {
             buffer: [None; BUFFER_SIZE],
-            confidence_score: 0.0,
+            crowded: (0, 0.0),
         }
     }
 
-    /// バッファ内データの信頼度に応じて角度閾値を計算する
-    /// 
-    /// データの信頼度が低い（分布度が小さい）ときは、オフセット推定
-    /// が上手くいっていない状態を考慮して角度閾値を小さくする。
-    /// データの信頼度が高い（分布度が大きい）ときは、必要以上の
-    /// バッファ更新が起こらないように角度閾値を大きくする。
-    fn angular_threshold(&self) -> f32 {
-        // N個の点が球面を等面積で分割するとした場合の、隣接する点同士の角度距離
-        let theta = 2.0 * (1.0 - 2.0 / (BUFFER_SIZE as f32)).acos();
-
-        // cos値で比較するために変換
-        (ANGULAR_THR_COEF * theta * self.confidence_score).cos()
-    }
-
     /// 寿命閾値を計算
-    /// 
+    ///
     /// バッファ内年齢の平均値×AGE_THRESHOLDを寿命閾値とする。
     fn lifetime_threshold(&self) -> u16 {
         // 平均値計算（中央値は計算コストが高いから平均値にした）
@@ -78,7 +57,7 @@ impl CoverageBuffer {
     }
 
     /// 指定したインデックスに点を挿入し、挿入した点以外のageをインクリメントする。
-    /// 
+    ///
     /// 指定したインデックスに点が存在する場合は上書きする。
     fn insert(&mut self, idx: usize, point: Vector3<f32>) {
         for (i, slot) in self.buffer.iter_mut().enumerate() {
@@ -90,121 +69,150 @@ impl CoverageBuffer {
         }
     }
 
-    /// 他点との距離が最小な点（一番密集している点）のインデックスを返す。
-    fn most_crowded_idx(&self) -> usize {
-        let mut most_crowded_idx = 0;  // 最密集点のインデックス
-        let mut smallest_nearest_dist = f32::INFINITY; // 距離最小＝最密集
-
-        for i in 0..BUFFER_SIZE {
-            let Some(ei) = &self.buffer[i] else { continue };
-
-            // 全ての組み合わせで点同士の距離を確認
-            let mut min_dist = f32::INFINITY;
-            for j in (i + 1)..BUFFER_SIZE {  // 同じ点同士を2回比較しないようにする
-                if let Some(ej) = &self.buffer[j] {
-                    let d = ei.point - ej.point;
-                    let dist = d.x.abs() + d.y.abs() + d.z.abs();  // 一番シンプルな L1ノルム で見る
-                    min_dist = min_dist.min(dist);
+    /// 最密集点のインデックスと二乗距離を計算する。
+    ///
+    /// 最密ペアのうち、2番目の近傍点が近い方を選ぶ。
+    /// 全ペアを調べるので計算量はO(N²)。
+    fn search_crowded_point(&mut self) {
+        // 1. 互いの距離が最短となるペアを選ぶ。
+        let mut closest_pair = None;
+        let mut min_sq = f32::INFINITY;
+        for (i, slot) in self.buffer.iter().enumerate() {
+            let Some(entry) = slot else { continue };
+            for (j, other) in self.buffer.iter().enumerate().skip(i + 1) {
+                let Some(other) = other else { continue };
+                let distance_sq = (entry.point - other.point).norm_squared();
+                if distance_sq < min_sq {
+                    min_sq = distance_sq;
+                    closest_pair = Some((i, j));
                 }
-            }
-            // min_distが最も小さい点＝最も近い隣を持つ点＝一番密集している点
-            if min_dist < smallest_nearest_dist {
-                smallest_nearest_dist = min_dist;
-                most_crowded_idx = i;
             }
         }
 
-        most_crowded_idx
+        // 2点未満ならペアがないため二乗距離は0。インデックスはなんでもいいので0にしておく。
+        self.crowded = (0, 0.0);
+        let Some((i, j)) = closest_pair else { return };
+        let a = self.buffer[i].unwrap();
+        let b = self.buffer[j].unwrap();
+
+        // 2. 選んだペアのうち、他の点までの距離がより近い方を最密集点として選ぶ。
+        let mut second_a = f32::INFINITY;
+        let mut second_b = f32::INFINITY;
+        for (k, slot) in self.buffer.iter().enumerate() {
+            if k == i || k == j {
+                continue;
+            }
+            let Some(entry) = slot else { continue };
+            second_a = second_a.min((a.point - entry.point).norm_squared());
+            second_b = second_b.min((b.point - entry.point).norm_squared());
+        }
+
+        // 3. 最密集ペアのうち周囲の点により近い方を置き換え候補にする
+        let crowded_idx = if second_b < second_a { j } else { i };
+        self.crowded = (crowded_idx, min_sq);
     }
 
-    /// 新しい測定値を投入する
-    /// * `point` : 生の地磁気計測値
-    /// * `center`: 現時点でのオフセット推定値
+    /// 新しい地磁気計測値を投入する。
     /// 
-    /// 処理ステップ：
-    /// 1. 既存の点との距離（角度）を見る。
-    ///    a. バッファに空きがあれば無条件で追加。
-    ///    b. バッファが満タンで、閾値内に既存点がある → スキップ
-    ///    c. バッファが満タンで、閾値内に既存点が無い → 最近傍点を置き換え (ageインクリメント)
-    /// 2. バッファが満タンの場合は寿命を越えた点を削除
-    /// 3. 信頼度更新
-    pub fn update(&mut self, point: Vector3<f32>, center: Vector3<f32>) {
-        // --- Step.1 --- //
-        // 既存の点との距離（角度）を見る
-        // 角度比較はcenterで中心化・正規化してから行う
-        let new_dir = (point - center).normalize();
-
-        // 空きスロットの有無と、閾値内の点の有無を調べる。
-        let mut nearest_flag = false;  // 閾値内の近い点があればtrue
-        let mut empty_idx: Option<usize> = None;  // 空きスロットのインデックス
+    /// 既存点が最密ペア距離の半分以内ならスキップする。
+    pub fn update(&mut self, point: Vector3<f32>) {
+        // 1. 新点の最近傍距離と、空きスロットを調べる。
+        let mut dn_sq = f32::INFINITY;  // 新点と既存点の二乗距離の最小値。空なら∞。
+        let mut empty_idx = None;  // 追加先に使える空きスロット
         for (i, slot) in self.buffer.iter().enumerate() {
             if let Some(entry) = slot {
-                let existing_dir = (entry.point - center).normalize();
-                let cos_angle = new_dir.dot(&existing_dir);  // 既存点との角度（のコサイン）
-                if cos_angle > self.angular_threshold() {
-                    nearest_flag = true;
-                }
+                dn_sq = dn_sq.min((point - entry.point).norm_squared());
             } else {
                 empty_idx = Some(i);
             }
         }
+        // 空きスロットの有無にかかわらず、既存点に近ければスキップする。
+        // 既存点が2点未満ならdmin_sqは0なので、同一点だけが弾かれる。
+        if dn_sq <= 0.25 * self.crowded.1 {  // 二乗距離なので係数は0.5^2=0.25
+            return;
+        }
 
-        if let Some(idx) = empty_idx {
-            // バッファに空きがあるなら無条件で追加する
-            self.insert(idx, point);
-        } else {
-            if nearest_flag == true {
-                // バッファに空きがなく、角度閾値内に既存点があるならreturn。
-                return;
-            } else {
-                // バッファに空きがなく角度閾値内に既存点も無ければ、再密集点を新しい点で置き換え。
-                self.insert(self.most_crowded_idx(), point);    
+        // 2. 空きがあればそのまま追加し、満杯なら最密集点を置き換える。
+        self.insert(empty_idx.unwrap_or(self.crowded.0), point);
+
+        // 3. 寿命閾値を超えた点を削除
+        let thr = self.lifetime_threshold();
+        for slot in &mut self.buffer {
+            if slot.as_ref().is_some_and(|entry| entry.age > thr) {
+                *slot = None;
             }
         }
 
-        // --- Step.2 --- //
-        // 寿命を越えた点を削除
-        let lifetime = self.lifetime_threshold();
-        for slot in self.buffer.iter_mut() {
-            if let Some(entry) = slot {
-                if entry.age > lifetime {
-                    *slot = None;
-                }
-            }
+        // 4. 最密集点を再探索
+        self.search_crowded_point();
+    }
+
+    /// バッファ内の点群の重心を返す。空なら `None`。
+    pub fn centroid(&self) -> Option<Vector3<f32>> {
+        let mut sum = Vector3::zeros();
+        let mut n = 0;
+        for entry in self.buffer.iter().flatten() {
+            sum += entry.point;
+            n += 1;
+        }
+        if n == 0 {
+            return None;
+        }
+        Some(sum / n as f32)
+    }
+
+    /// 指定した中心 `center` を基準に、現在の点群の信頼度を計算する。
+    pub fn confidence_score(&self, center: Vector3<f32>) -> f32 {
+        let mut m = Matrix3x3::<f32>::zeros(); // 分散共分散行列
+        let mut n = 0;
+        let mut sum_d2 = 0.0; // Σ|d|²（= tr(M)）
+        let mut sum_d4 = 0.0; // Σ|d|⁴
+        for entry in self.buffer.iter().flatten() {
+            let d = entry.point - center;
+            let d2 = d.norm_squared();
+            m += d * d.transpose();
+            sum_d2 += d2;
+            sum_d4 += d2 * d2;
+            n += 1;
         }
 
-        // --- Step.3 --- //
-        // 信頼度更新
-        // 点の分布度を表す行列mを計算
-        let mut m = Matrix3x3::<f32>::zeros();
-        for slot in &self.buffer {
-            if let Some(e) = slot {
-                let dir = (e.point - center).normalize();
-                m += dir * dir.transpose();
-            }
+        // 点が2つ未満、または全点が中心と一致する場合は信頼度を0にする。
+        if n < 2 || sum_d2 <= 0.0 {
+            return 0.0;
         }
 
-        // 条件数の考え方を基に、mの最小固有値からバッファ内データの信頼度を計算
-        //
-        // 一つの単位ベクトルuに対して、u uᵀ の対角成分はuのL2ノルムとなるから
-        // trace(u uᵀ) == 1が成り立つ。mはこれをn点でやっているのでtrace(m)==nとなる。
-        // つまり、trace(m)==nということは3つの固有値の合計がnということなので、
-        // 最小固有値は必ずn/3以下になる。λ_min==n/3が成り立つのは、uが全方向に
-        // 均等に分布している場合のみ。
-        // 
-        // * 均一に分布：lambda_min → n/3 (score → 1)
-        // * 偏り大　　：lambda_min → 0   (score → 0)
-        let eigenvalues = m.symmetric_eigenvalues();
-        let lambda_min = eigenvalues.min();  // 最小固有値
-        self.confidence_score = lambda_min * (3.0 / BUFFER_SIZE as f32);  // n/3で割って[0, 1]に正規化
+        // 殻らしさfを計算
+        // 球面上なら k = 1、3次元ガウスの塊なら k = 5/3
+        let k = (n as f32) * sum_d4 / (sum_d2 * sum_d2);
+        let f = ((5.0 / 3.0 - k) * 1.5).clamp(0.0, 1.0);
+        if f == 0.0 {
+            // 積が0になるので固有値計算を省略
+            return 0.0;
+        }
+
+        // 充足度
+        let fill_rate = n as f32 / BUFFER_SIZE as f32;
+
+        // 等方性：2次モーメントで「丸さ」を見る
+        let lambda_min = m.symmetric_eigenvalues().min();
+        // 旧式：全球の等方分布を満点とする。
+        // let isotropy = 3.0 * lambda_min / sum_d2;
+
+        // 半球の一様分布では、重心まわりの3λ_min/tr(M)が1/3になる。
+        // これを満点に換算し、それ以上の等方性は1で頭打ちにする。
+        // 上限を設けるのは等方性だけで、充足度と殻らしさは引き続き掛ける。
+        let isotropy = (9.0 * lambda_min / sum_d2).min(1.0);
+
+        (isotropy * fill_rate * f).clamp(0.0, 1.0)
     }
 
     /// バッファをリセットする
+    #[allow(dead_code)]
     pub fn reset(&mut self) {
         for slot in self.buffer.iter_mut() {
             *slot = None;
         }
-        self.confidence_score = 0.0;
+        self.crowded = (0, 0.0);
     }
 
     /// バッファ内の有効な点の数を返す
@@ -219,7 +227,7 @@ impl CoverageBuffer {
     }
 
     /// バッファ内の点を配列にコピーして返す（先頭count()個が有効）
-    /// 
+    ///
     /// main.rsでのバッファデータ出力用
     pub fn points(&self) -> [Vector3<f32>; BUFFER_SIZE] {
         let mut out = [Vector3::<f32>::zeros(); BUFFER_SIZE];
@@ -232,5 +240,4 @@ impl CoverageBuffer {
         }
         out
     }
-
 }

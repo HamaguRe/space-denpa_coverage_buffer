@@ -17,14 +17,14 @@ use buffer::{CoverageBuffer, BUFFER_SIZE};
 use calibrator::LeastSquaresFull;
 
 /// 信頼度がこの値より大きければ楕円フィッティング計算をする
-const CONFIDENCE_THR: f32 = 0.1;
+const CONFIDENCE_THR: f32 = 0.08;
 
 /// スナップショットを出力するステップ
 //const SNAPSHOT_STEPS: &[usize] = &[300, 900, 1500, 2000];  // data-set1用
 const SNAPSHOT_STEPS: &[usize] = &[1000, 3000, 6000, 9000];  // data-set2用
 
 /// 2回目のデータに加える固定オフセット
-const OFFSET_2ND: Vector3<f32> = Vector3::new(0.2, 0.3, -0.01);
+//const OFFSET_2ND: Vector3<f32> = Vector3::new(0.2, 0.3, -0.01);
 
 /// result_*.csv のヘッダ
 const RESULT_HEADER: &[u8] = b"TimeStep,b_x,b_y,b_z,D11,D22,D33,D12,D13,D23,calib_x,calib_y,calib_z,confidence,age_min,age_median,age_mean,age_max,buffer_count\n";
@@ -54,9 +54,8 @@ fn main() {
     for k in 0..mag_samples.len() {
         let raw = mag_samples[k];
 
-        // バッファに投入（角度比較は現在のオフセット推定値で中心化して行う）
-        let (center, _) = cal.params();
-        buf.update(raw, center);
+        // バッファ更新
+        buf.update(raw);
 
         // バッファ内エントリのageを全点書き出す
         for slot in &buf.buffer {
@@ -68,15 +67,16 @@ fn main() {
         // バッファの中身を集めて較正器を更新
         let buf_points = buf.points();
         let n = buf.count();
-        let confidence_score = buf.confidence_score;
-        if n == BUFFER_SIZE && confidence_score > CONFIDENCE_THR {
+        let center = buf.centroid().unwrap_or(Vector3::zeros());
+        let confidence_score = buf.confidence_score(center);
+        if confidence_score > CONFIDENCE_THR {
             cal.update(&buf_points[..n]);
         }
 
         // 較正パラメータと較正値を取得
         let (center, correction) = cal.params();
         let calibrated = cal.calibrate(raw);
-        let confidence = buf.confidence_score;
+        let confidence = confidence_score;
 
         // バッファ内のage統計（min/median/mean/max）を計算
         let (age_min, age_median, age_mean, age_max) = {
