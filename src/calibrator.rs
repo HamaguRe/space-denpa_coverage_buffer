@@ -34,13 +34,13 @@ pub fn fit(points: &[Vector3<f32>]) -> Option<(Vector3<f32>, Matrix3x3<f32>)> {
     }
     let v = Cholesky::new(m)?.solve(&rhs);
 
-    let thetaeta = Vector10::<f32>::from([
+    let theta = Vector10::<f32>::from([
         v[0], v[1], 1.0 - v[0] - v[1],
         v[2], v[3], v[4],
         v[5], v[6], v[7],
         v[8],
     ]);
-    let (center, correction) = extract_full_ellipsoid_params(thetaeta)?;
+    let (center, correction) = extract_full_ellipsoid_params(theta)?;
     Some((center + g, correction))
 }
 
