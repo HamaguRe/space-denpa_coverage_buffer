@@ -53,7 +53,7 @@ def step_from_path(p):
 
 
 # 較正前のデータを読み込む（比較表示用）
-mag_raw = load_csv("./magnetic_data/data-set_2.csv")
+mag_raw = load_csv("./result/result_raw.csv")
 
 # 較正結果のデータを読み込む
 result = load_csv("./result/result_full.csv")
@@ -81,8 +81,11 @@ for key in ["D12", "D13", "D23"]:
     ax_scale.plot(k, result[key], linestyle="--", label=key)
 ax_scale.legend(loc="lower right")
 
-# 信頼度スコア
-ax_confidence.plot(k, result["confidence"], color="purple", label="confidence")
+# 信頼度スコア（事前評価・事後評価としきい値）
+ax_confidence.plot(k, result["pre_score"],  color="#0072B2", linewidth=1.0, label="Pre: isotropy × fill")
+ax_confidence.plot(k, result["post_score"], color="#D55E00", linewidth=1.0, label="Post: shell-likeness")
+ax_confidence.axhline(result["pre_threshold"][0],  color="#0072B2", linestyle="--", linewidth=0.8)
+ax_confidence.axhline(result["post_threshold"][0], color="#D55E00", linestyle="--", linewidth=0.8)
 ax_confidence.set_xlim(0, k[-1])
 ax_confidence.set_ylim(0.0, 1.0)
 ax_confidence.legend(loc="lower right")

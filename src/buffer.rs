@@ -2,7 +2,7 @@
 //!
 //! 地磁気計測値が球面上に分布するようにデータを保持するバッファアルゴリズム
 
-use super::{Matrix3x3, Vector3};
+use nalgebra::Vector3;
 
 /// バッファサイズ
 pub const BUFFER_SIZE: usize = 16;
@@ -21,7 +21,7 @@ pub struct Entry {
 
 /// 空間上の均等な分布を維持するように地磁気計測値を保持するバッファ
 pub struct CoverageBuffer {
-    pub buffer: [Option<Entry>; BUFFER_SIZE],
+    buffer: [Option<Entry>; BUFFER_SIZE],
     crowded: (usize, f32), // (最密集点のインデックス, 最密集ペアの二乗距離)
 }
 
@@ -32,6 +32,11 @@ impl CoverageBuffer {
             buffer: [None; BUFFER_SIZE],
             crowded: (0, 0.0),
         }
+    }
+
+    /// 有効なエントリをスロット順に参照する。
+    pub fn entries(&self) -> impl Iterator<Item = &Entry> {
+        self.buffer.iter().flatten()
     }
 
     /// 寿命閾値を計算
@@ -147,65 +152,6 @@ impl CoverageBuffer {
         self.search_crowded_point();
     }
 
-    /// バッファ内の点群の重心を返す。空なら `None`。
-    pub fn centroid(&self) -> Option<Vector3<f32>> {
-        let mut sum = Vector3::zeros();
-        let mut n = 0;
-        for entry in self.buffer.iter().flatten() {
-            sum += entry.point;
-            n += 1;
-        }
-        if n == 0 {
-            return None;
-        }
-        Some(sum / n as f32)
-    }
-
-    /// 指定した中心 `center` を基準に、現在の点群の信頼度を計算する。
-    pub fn confidence_score(&self, center: Vector3<f32>) -> f32 {
-        let mut m = Matrix3x3::<f32>::zeros(); // 分散共分散行列
-        let mut n = 0;
-        let mut sum_d2 = 0.0; // Σ|d|²（= tr(M)）
-        let mut sum_d4 = 0.0; // Σ|d|⁴
-        for entry in self.buffer.iter().flatten() {
-            let d = entry.point - center;
-            let d2 = d.norm_squared();
-            m += d * d.transpose();
-            sum_d2 += d2;
-            sum_d4 += d2 * d2;
-            n += 1;
-        }
-
-        // 点が2つ未満、または全点が中心と一致する場合は信頼度を0にする。
-        if n < 2 || sum_d2 <= 0.0 {
-            return 0.0;
-        }
-
-        // 殻らしさfを計算
-        // 球面上なら k = 1、3次元ガウスの塊なら k = 5/3
-        let k = (n as f32) * sum_d4 / (sum_d2 * sum_d2);
-        let f = ((5.0 / 3.0 - k) * 1.5).clamp(0.0, 1.0);
-        if f == 0.0 {
-            // 積が0になるので固有値計算を省略
-            return 0.0;
-        }
-
-        // 充足度
-        let fill_rate = n as f32 / BUFFER_SIZE as f32;
-
-        // 等方性：2次モーメントで「丸さ」を見る
-        let lambda_min = m.symmetric_eigenvalues().min();
-        // 旧式：全球の等方分布を満点とする。
-        // let isotropy = 3.0 * lambda_min / sum_d2;
-
-        // 半球の一様分布では、重心まわりの3λ_min/tr(M)が1/3になる。
-        // これを満点に換算し、それ以上の等方性は1で頭打ちにする。
-        // 上限を設けるのは等方性だけで、充足度と殻らしさは引き続き掛ける。
-        let isotropy = (9.0 * lambda_min / sum_d2).min(1.0);
-
-        (isotropy * fill_rate * f).clamp(0.0, 1.0)
-    }
-
     /// バッファをリセットする
     #[allow(dead_code)]
     pub fn reset(&mut self) {
@@ -213,31 +159,5 @@ impl CoverageBuffer {
             *slot = None;
         }
         self.crowded = (0, 0.0);
-    }
-
-    /// バッファ内の有効な点の数を返す
-    pub fn count(&self) -> usize {
-        let mut n = 0;
-        for slot in &self.buffer {
-            if slot.is_some() {
-                n += 1;
-            }
-        }
-        n
-    }
-
-    /// バッファ内の点を配列にコピーして返す（先頭count()個が有効）
-    ///
-    /// main.rsでのバッファデータ出力用
-    pub fn points(&self) -> [Vector3<f32>; BUFFER_SIZE] {
-        let mut out = [Vector3::<f32>::zeros(); BUFFER_SIZE];
-        let mut n = 0;
-        for slot in &self.buffer {
-            if let Some(e) = slot {
-                out[n] = e.point;
-                n += 1;
-            }
-        }
-        out
     }
 }
